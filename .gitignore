@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+workers/*/dist/
+workers/prisma-v7/src/generated/
+workers/prisma-next/.prisma/
+.tmp/
+*.log

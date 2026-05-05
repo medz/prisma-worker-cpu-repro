@@ -1,0 +1,27 @@
+{
+  "name": "prisma-worker-cpu-repro",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.6.2",
+  "workspaces": [
+    "workers/prisma-v7",
+    "workers/drizzle-v1"
+  ],
+  "scripts": {
+    "setup:db": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f packages/db/schema.sql",
+    "seed": "node scripts/seed.mjs",
+    "generate:prisma-v7": "npm --workspace workers/prisma-v7 run generate",
+    "build": "npm run build:prisma-v7 && npm run build:drizzle-v1",
+    "build:prisma-v7": "npm --workspace workers/prisma-v7 run build",
+    "build:drizzle-v1": "npm --workspace workers/drizzle-v1 run build",
+    "deploy:prisma-v7": "npm --workspace workers/prisma-v7 run deploy",
+    "deploy:drizzle-v1": "npm --workspace workers/drizzle-v1 run deploy",
+    "benchmark:cloudflare": "node scripts/cloudflare-benchmark.mjs",
+    "cleanup:cloudflare": "node scripts/cloudflare-cleanup.mjs",
+    "bench": "node scripts/load-test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "pg": "^8.20.0"
+  }
+}
