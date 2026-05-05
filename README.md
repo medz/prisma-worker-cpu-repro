@@ -89,17 +89,22 @@ benchmark pass, sends the benchmark traffic, and writes a CPU/wall comparison
 report:
 
 ```sh
-npm run benchmark:cloudflare -- \
-  --region us-east-1 \
-  --ttl 30m \
-  --article-count 100000 \
-  --requests 200 \
-  --concurrency 20 \
-  --repeat 20
+npm run benchmark:cloudflare
 ```
 
-The command uses `npx create-db@latest create --json` for the temporary
-PostgreSQL database. You can also provide an existing database:
+The defaults are intentionally configured to make CPU differences visible:
+
+| Setting | Default |
+| --- | ---: |
+| Seeded articles | `100000` |
+| Measured requests per route | `60` |
+| Client concurrency | `6` |
+| ORM repeats per request | `50` |
+| Warmup requests per route | `5` |
+| Temporary DB TTL | `30m` |
+
+The command uses `npx create-db@latest create --json --ttl 30m` for the
+temporary PostgreSQL database. You can also provide an existing database:
 
 ```sh
 npm run benchmark:cloudflare -- --database-url "$DATABASE_URL"
@@ -107,7 +112,9 @@ npm run benchmark:cloudflare -- --database-url "$DATABASE_URL"
 
 Reports are written to `.tmp/cloudflare-benchmark/<run-id>/report.md` and
 `report.json`. CPU and wall values in those reports come from
-`wrangler tail --format json`, not local request timing.
+`wrangler tail --format json`, not local request timing. The generated Markdown
+report includes route-level CPU/wall p50/p95 plus a Prisma v7 vs Drizzle v1 CPU
+ratio table.
 
 The command deletes the deployed benchmark Workers in a `finally` block by
 default. If a run is interrupted, clean up Cloudflare Worker resources manually:
@@ -133,4 +140,4 @@ publishes Early Access packages or a supported external consumption path. See
 
 ## Report
 
-`REPORT.md` contains the issue body draft for Prisma.
+`REPORT.md` contains the issue report for Prisma.

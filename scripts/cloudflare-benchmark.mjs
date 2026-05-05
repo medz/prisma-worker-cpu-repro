@@ -6,6 +6,17 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const DEFAULT_ARTICLE_COUNT = 100_000;
+const DEFAULT_BATCH_SIZE = 2_000;
+const DEFAULT_REQUESTS = 60;
+const DEFAULT_CONCURRENCY = 6;
+const DEFAULT_LIMIT = 20;
+const DEFAULT_REPEAT = 50;
+const DEFAULT_REGION = 'us-east-1';
+const DEFAULT_TTL = '30m';
+const DEFAULT_TAIL_WARMUP_MS = 10_000;
+const DEFAULT_TAIL_SETTLE_MS = 5_000;
+const DEFAULT_WARMUP_REQUESTS = 5;
 const DEFAULT_ROUTES = [
   { id: 'articles', path: '/bench/articles' },
   { id: 'articles-by-column-hot', path: '/bench/articles-by-column', params: { columnId: 'hot' } },
@@ -41,15 +52,17 @@ const WORKERS = {
 
 const args = parseArgs(process.argv.slice(2));
 const runId = args.get('run-id') ?? `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-const articleCount = getNumberArg('article-count', 100_000);
-const batchSize = getNumberArg('batch-size', 2_000);
-const requests = getNumberArg('requests', 200);
-const concurrency = getNumberArg('concurrency', 20);
-const limit = getNumberArg('limit', 20);
-const repeat = getNumberArg('repeat', 20);
-const region = args.get('region') ?? 'us-east-1';
-const ttl = args.get('ttl') ?? '30m';
-const tailWarmupMs = getNumberArg('tail-warmup-ms', 8_000);
+const articleCount = getNumberArg('article-count', DEFAULT_ARTICLE_COUNT);
+const batchSize = getNumberArg('batch-size', DEFAULT_BATCH_SIZE);
+const requests = getNumberArg('requests', DEFAULT_REQUESTS);
+const concurrency = getNumberArg('concurrency', DEFAULT_CONCURRENCY);
+const limit = getNumberArg('limit', DEFAULT_LIMIT);
+const repeat = getNumberArg('repeat', DEFAULT_REPEAT);
+const region = args.get('region') ?? DEFAULT_REGION;
+const ttl = args.get('ttl') ?? DEFAULT_TTL;
+const tailWarmupMs = getNumberArg('tail-warmup-ms', DEFAULT_TAIL_WARMUP_MS);
+const tailSettleMs = getNumberArg('tail-settle-ms', DEFAULT_TAIL_SETTLE_MS);
+const warmupRequests = getNumberArg('warmup-requests', DEFAULT_WARMUP_REQUESTS);
 const cloudflareAccountId = args.get('account-id') ?? process.env.CLOUDFLARE_ACCOUNT_ID;
 const keepWorkers = args.has('keep-workers');
 const outputDir = path.resolve(ROOT_DIR, args.get('output') ?? `.tmp/cloudflare-benchmark/${runId}`);
@@ -98,6 +111,8 @@ async function main() {
       limit,
       repeat,
       tailWarmupMs,
+      tailSettleMs,
+      warmupRequests,
     },
     cleanup: {
       workersDeleted: !keepWorkers,
@@ -183,12 +198,13 @@ function printUsage() {
 
 Options:
   --database-url <url>      Reuse an existing PostgreSQL URL instead of npx create-db.
-  --region <region>        Prisma Postgres create-db region. Default: us-east-1.
-  --ttl <ttl>              Temporary DB lifetime. Default: 30m.
-  --article-count <count>  Seeded article count. Default: 100000.
-  --requests <count>       Requests per route. Default: 200.
-  --concurrency <count>    Client concurrency. Default: 20.
-  --repeat <count>         ORM operation repeat count per request. Default: 20.
+  --region <region>        Prisma Postgres create-db region. Default: ${DEFAULT_REGION}.
+  --ttl <ttl>              Temporary DB lifetime. Default: ${DEFAULT_TTL}.
+  --article-count <count>  Seeded article count. Default: ${DEFAULT_ARTICLE_COUNT}.
+  --requests <count>       Measured requests per route. Default: ${DEFAULT_REQUESTS}.
+  --concurrency <count>    Client concurrency. Default: ${DEFAULT_CONCURRENCY}.
+  --repeat <count>         ORM operation repeat count per request. Default: ${DEFAULT_REPEAT}.
+  --warmup-requests <n>    Unmeasured warmup requests per route. Default: ${DEFAULT_WARMUP_REQUESTS}.
   --workers <ids>          Comma-separated worker ids. Default: prisma-v7,drizzle-v1,prisma-next.
   --account-id <id>        Cloudflare account id. Defaults to CLOUDFLARE_ACCOUNT_ID.
   --keep-workers           Keep deployed Workers after the benchmark. Default: false.
@@ -326,12 +342,22 @@ async function benchmarkWorker(worker, baseUrl) {
         url.searchParams.set(key, value);
       }
 
+      const warmupUrl = new URL(url);
+      warmupUrl.searchParams.set('benchPhase', 'warmup');
+      await loadTest(
+        warmupUrl.toString(),
+        warmupRequests,
+        Math.min(concurrency, warmupRequests),
+      );
+      await sleep(tailSettleMs);
+
+      url.searchParams.set('benchPhase', 'measure');
       const startedEventIndex = tail.events.length;
       const latency = await loadTest(url.toString());
-      await sleep(3_000);
+      await sleep(tailSettleMs);
       const routeEvents = tail.events
         .slice(startedEventIndex)
-        .filter((event) => eventMatches(event, runId, route.id));
+        .filter((event) => eventMatches(event, route.id, 'measure'));
       const cpuValues = routeEvents.map((event) => findMetric(event, 'cpu')).filter(isFiniteNumber);
       const wallValues = routeEvents.map((event) => findMetric(event, 'wall')).filter(isFiniteNumber);
 
@@ -463,13 +489,13 @@ function createJsonObjectParser(onValue) {
   };
 }
 
-async function loadTest(url) {
+async function loadTest(url, requestCount = requests, concurrencyCount = concurrency) {
   const latencies = [];
   let next = 0;
   let errors = 0;
 
   async function runWorker() {
-    while (next < requests) {
+    while (next < requestCount) {
       next += 1;
       const started = performance.now();
       const response = await fetch(url);
@@ -484,12 +510,12 @@ async function loadTest(url) {
     }
   }
 
-  await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+  await Promise.all(Array.from({ length: concurrencyCount }, () => runWorker()));
   latencies.sort((a, b) => a - b);
 
   return {
-    requests,
-    concurrency,
+    requests: requestCount,
+    concurrency: concurrencyCount,
     errors,
     minMs: latencies[0] ?? null,
     p50Ms: pick(latencies, 0.5),
@@ -512,6 +538,10 @@ function formatMarkdownReport(report) {
     `Created at: \`${report.createdAt}\``,
     `Database source: \`${report.database.source}\``,
     `Articles: \`${report.database.articleCount}\``,
+    `Measured requests per route: \`${report.benchmark.requests}\``,
+    `Concurrency: \`${report.benchmark.concurrency}\``,
+    `Repeat per request: \`${report.benchmark.repeat}\``,
+    `Warmup requests per route: \`${report.benchmark.warmupRequests}\``,
     '',
     '| Worker | Route | Tail events | CPU p50 | CPU p95 | Wall p50 | Wall p95 | Latency p95 | Errors |',
     '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
@@ -540,9 +570,60 @@ function formatMarkdownReport(report) {
     }
   }
 
+  const comparisons = buildComparisons(report);
+  if (comparisons.length) {
+    lines.push('');
+    lines.push('## Prisma v7 vs Drizzle v1');
+    lines.push('');
+    lines.push('| Route | Prisma CPU p50 | Drizzle CPU p50 | p50 ratio | Prisma CPU p95 | Drizzle CPU p95 | p95 ratio |');
+    lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: |');
+    for (const comparison of comparisons) {
+      lines.push(
+        [
+          comparison.route,
+          formatNumber(comparison.prismaP50),
+          formatNumber(comparison.drizzleP50),
+          formatRatio(comparison.p50Ratio),
+          formatNumber(comparison.prismaP95),
+          formatNumber(comparison.drizzleP95),
+          formatRatio(comparison.p95Ratio),
+        ].join(' | ').replace(/^/, '| ').replace(/$/, ' |'),
+      );
+    }
+  }
+
   lines.push('');
   lines.push('CPU and wall values come from `wrangler tail --format json`, not local timing.');
+  lines.push(`Benchmark Workers deleted after run: \`${report.cleanup.workersDeleted}\`.`);
+  lines.push(`Database cleanup: ${report.cleanup.database}.`);
   return `${lines.join('\n')}\n`;
+}
+
+function buildComparisons(report) {
+  const prisma = report.workers.find((worker) => worker.id === 'prisma-v7' && worker.status === 'completed');
+  const drizzle = report.workers.find((worker) => worker.id === 'drizzle-v1' && worker.status === 'completed');
+  if (!prisma || !drizzle) return [];
+
+  const drizzleByRoute = new Map(drizzle.routes.map((route) => [route.id, route]));
+  return prisma.routes.flatMap((prismaRoute) => {
+    const drizzleRoute = drizzleByRoute.get(prismaRoute.id);
+    if (!drizzleRoute) return [];
+
+    const prismaP50 = prismaRoute.cpuTime.p50;
+    const drizzleP50 = drizzleRoute.cpuTime.p50;
+    const prismaP95 = prismaRoute.cpuTime.p95;
+    const drizzleP95 = drizzleRoute.cpuTime.p95;
+
+    return {
+      route: prismaRoute.id,
+      prismaP50,
+      drizzleP50,
+      p50Ratio: ratio(prismaP50, drizzleP50),
+      prismaP95,
+      drizzleP95,
+      p95Ratio: ratio(prismaP95, drizzleP95),
+    };
+  });
 }
 
 function redactReport(report) {
@@ -615,13 +696,15 @@ function extractWorkerUrl(output) {
   return output.match(/https:\/\/[^\s]+\.workers\.dev[^\s]*/)?.[0];
 }
 
-function eventMatches(event, id, routeId) {
+function eventMatches(event, routeId, phase) {
   const requestUrl = event?.event?.request?.url;
   if (typeof requestUrl === 'string') {
-    return new URL(requestUrl).searchParams.get('benchRoute') === routeId;
+    const params = new URL(requestUrl).searchParams;
+    return params.get('benchRoute') === routeId && params.get('benchPhase') === phase;
   }
 
-  return JSON.stringify(event).includes(`benchRoute=${routeId}`);
+  const text = JSON.stringify(event);
+  return text.includes(`benchRoute=${routeId}`) && text.includes(`benchPhase=${phase}`);
 }
 
 function findMetric(event, kind) {
@@ -681,6 +764,17 @@ function pick(values, p) {
 
 function formatNumber(value) {
   return value === null || value === void 0 ? '' : Number(value).toFixed(2);
+}
+
+function ratio(numerator, denominator) {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator === 0) {
+    return null;
+  }
+  return numerator / denominator;
+}
+
+function formatRatio(value) {
+  return value === null || value === void 0 ? '' : `${Number(value).toFixed(2)}x`;
 }
 
 function sleep(ms) {
