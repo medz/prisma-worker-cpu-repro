@@ -1,12 +1,15 @@
 # Prisma Worker CPU reproduction
 
 This repository is a focused Cloudflare Workers reproduction for comparing ORM
-CPU overhead on the same PostgreSQL workload. It uses a plain PostgreSQL
-`DATABASE_URL` so the comparison stays focused on ORM/runtime overhead:
+CPU overhead on the smallest useful PostgreSQL workload. It intentionally uses a
+single `Hello` table with one row so database shape, relation complexity, data
+volume, and index choices do not dominate the result.
+
+The comparison keeps these variables the same:
 
 - same PostgreSQL database
-- same tables and seed data
-- same benchmark routes
+- same one-table schema and one seeded row
+- same `/bench/hello` route
 - same request-scoped client lifecycle
 - same Cloudflare Worker runtime
 - different ORM implementation
@@ -28,7 +31,7 @@ using global client reuse as a workaround.
 The comparison is:
 
 > With the correct Cloudflare Worker request lifecycle, how much CPU does each
-> ORM spend per request for equivalent query shapes?
+> ORM spend per request for the same minimal query?
 
 ## Setup
 
@@ -38,7 +41,7 @@ Use a regular PostgreSQL database reachable from Workers.
 export DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require'
 npm install
 npm run setup:db
-ARTICLE_COUNT=100000 npm run seed
+npm run seed
 npm run generate:prisma-v7
 npm run build
 ```
@@ -57,31 +60,28 @@ npm run deploy:prisma-v7
 npm run deploy:drizzle-v1
 ```
 
-## Benchmark routes
+## Benchmark Route
 
 All runnable Workers expose:
 
 - `GET /health`
-- `GET /bench/articles?limit=20&repeat=20`
-- `GET /bench/articles-by-column?columnId=hot&limit=20&repeat=20`
-- `GET /bench/articles-by-column?columnId=older-hot&limit=20&repeat=20`
-- `GET /bench/detail?articleId=a00000001&repeat=20`
-- `GET /bench/related?articleId=a00000001&limit=20&repeat=20`
+- `GET /bench/hello`
 
-The `repeat` parameter intentionally repeats the same ORM operation within one
-request so Workers CPU metrics have enough signal.
+`/bench/hello` selects the single seeded row by primary key and returns its
+content length. Each measured request represents one request-scoped ORM client
+lifecycle plus one minimal query.
 
 Run a client-side load test:
 
 ```sh
-npm run bench -- --url 'https://<worker-url>/bench/articles?limit=20&repeat=20' --requests 200 --concurrency 20
+npm run bench -- --url 'https://<worker-url>/bench/hello' --requests 200 --concurrency 20
 ```
 
 Client-side latency is not CPU time. Use Workers Logs, Tail Workers, Logpush, or
 Workers Observability to collect `cpuTime` and `wallTime` for the deployed
 Workers.
 
-## One-command Cloudflare benchmark
+## One-command Cloudflare Benchmark
 
 The preferred reproduction command provisions a temporary Prisma Postgres
 database, deploys the runnable Workers, attaches `wrangler tail` before each
@@ -92,14 +92,16 @@ report:
 npm run benchmark:cloudflare
 ```
 
-The defaults are intentionally configured to make CPU differences visible:
+The defaults are intentionally configured to make ORM CPU differences visible
+even though the database workload is only one primary-key lookup:
 
 | Setting | Default |
 | --- | ---: |
-| Seeded articles | `100000` |
+| Table | `Hello` |
+| Seeded rows | `1` |
+| Benchmark routes | `1` |
 | Measured requests per route | `60` |
 | Client concurrency | `6` |
-| ORM repeats per request | `50` |
 | Warmup requests per route | `5` |
 | Temporary DB TTL | `30m` |
 
@@ -133,7 +135,7 @@ Early Access packages or another supported install path are available.
 
 Prisma Next currently lives at <https://github.com/prisma/prisma-next>.
 
-The source slot in `workers/prisma-next` mirrors the same route shapes, but it is
+The source slot in `workers/prisma-next` mirrors the same route shape, but it is
 not included in the root `npm install` or `npm run build` until Prisma Next
 publishes Early Access packages or a supported external consumption path. See
 `workers/prisma-next/README.md`.

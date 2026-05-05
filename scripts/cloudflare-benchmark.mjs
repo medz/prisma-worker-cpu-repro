@@ -6,27 +6,17 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const DEFAULT_ARTICLE_COUNT = 100_000;
-const DEFAULT_BATCH_SIZE = 2_000;
+const WORKLOAD_TABLE = 'Hello';
+const WORKLOAD_ROWS = 1;
 const DEFAULT_REQUESTS = 60;
 const DEFAULT_CONCURRENCY = 6;
-const DEFAULT_LIMIT = 20;
-const DEFAULT_REPEAT = 50;
 const DEFAULT_REGION = 'us-east-1';
 const DEFAULT_TTL = '30m';
 const DEFAULT_TAIL_WARMUP_MS = 10_000;
 const DEFAULT_TAIL_SETTLE_MS = 5_000;
 const DEFAULT_WARMUP_REQUESTS = 5;
 const DEFAULT_ROUTES = [
-  { id: 'articles', path: '/bench/articles' },
-  { id: 'articles-by-column-hot', path: '/bench/articles-by-column', params: { columnId: 'hot' } },
-  {
-    id: 'articles-by-column-older-hot',
-    path: '/bench/articles-by-column',
-    params: { columnId: 'older-hot' },
-  },
-  { id: 'detail', path: '/bench/detail', params: { articleId: 'a00000001' } },
-  { id: 'related', path: '/bench/related', params: { articleId: 'a00000001' } },
+  { id: 'hello', path: '/bench/hello' },
 ];
 const WORKERS = {
   'prisma-v7': {
@@ -52,12 +42,8 @@ const WORKERS = {
 
 const args = parseArgs(process.argv.slice(2));
 const runId = args.get('run-id') ?? `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-const articleCount = getNumberArg('article-count', DEFAULT_ARTICLE_COUNT);
-const batchSize = getNumberArg('batch-size', DEFAULT_BATCH_SIZE);
 const requests = getNumberArg('requests', DEFAULT_REQUESTS);
 const concurrency = getNumberArg('concurrency', DEFAULT_CONCURRENCY);
-const limit = getNumberArg('limit', DEFAULT_LIMIT);
-const repeat = getNumberArg('repeat', DEFAULT_REPEAT);
 const region = args.get('region') ?? DEFAULT_REGION;
 const ttl = args.get('ttl') ?? DEFAULT_TTL;
 const tailWarmupMs = getNumberArg('tail-warmup-ms', DEFAULT_TAIL_WARMUP_MS);
@@ -87,11 +73,7 @@ async function main() {
 
   await applySchema(databaseUrl);
   await run('node', ['scripts/seed.mjs'], {
-    env: {
-      DATABASE_URL: databaseUrl,
-      ARTICLE_COUNT: String(articleCount),
-      BATCH_SIZE: String(batchSize),
-    },
+    env: { DATABASE_URL: databaseUrl },
   });
 
   await buildWorkers(workerIds, databaseUrl);
@@ -103,13 +85,12 @@ async function main() {
       source: args.has('database-url') || process.env.DATABASE_URL ? 'provided' : 'create-db',
       region,
       ttl,
-      articleCount,
+      table: WORKLOAD_TABLE,
+      rows: WORKLOAD_ROWS,
     },
     benchmark: {
       requests,
       concurrency,
-      limit,
-      repeat,
       tailWarmupMs,
       tailSettleMs,
       warmupRequests,
@@ -117,7 +98,7 @@ async function main() {
     cleanup: {
       workersDeleted: !keepWorkers,
       database: args.has('database-url') || process.env.DATABASE_URL ?
-        'provided database not modified beyond schema/data reset'
+        'provided database reset to the one-table Hello fixture'
       : `temporary Prisma Postgres database expires after ${ttl}`,
     },
     workers: [],
@@ -200,10 +181,8 @@ Options:
   --database-url <url>      Reuse an existing PostgreSQL URL instead of npx create-db.
   --region <region>        Prisma Postgres create-db region. Default: ${DEFAULT_REGION}.
   --ttl <ttl>              Temporary DB lifetime. Default: ${DEFAULT_TTL}.
-  --article-count <count>  Seeded article count. Default: ${DEFAULT_ARTICLE_COUNT}.
   --requests <count>       Measured requests per route. Default: ${DEFAULT_REQUESTS}.
   --concurrency <count>    Client concurrency. Default: ${DEFAULT_CONCURRENCY}.
-  --repeat <count>         ORM operation repeat count per request. Default: ${DEFAULT_REPEAT}.
   --warmup-requests <n>    Unmeasured warmup requests per route. Default: ${DEFAULT_WARMUP_REQUESTS}.
   --workers <ids>          Comma-separated worker ids. Default: prisma-v7,drizzle-v1,prisma-next.
   --account-id <id>        Cloudflare account id. Defaults to CLOUDFLARE_ACCOUNT_ID.
@@ -333,8 +312,6 @@ async function benchmarkWorker(worker, baseUrl) {
   try {
     for (const route of DEFAULT_ROUTES) {
       const url = new URL(route.path, baseUrl);
-      url.searchParams.set('limit', String(limit));
-      url.searchParams.set('repeat', String(repeat));
       url.searchParams.set('benchRun', runId);
       url.searchParams.set('benchWorker', worker.id);
       url.searchParams.set('benchRoute', route.id);
@@ -493,6 +470,8 @@ async function loadTest(url, requestCount = requests, concurrencyCount = concurr
   const latencies = [];
   let next = 0;
   let errors = 0;
+  const statusCounts = {};
+  const errorSamples = [];
 
   async function runWorker() {
     while (next < requestCount) {
@@ -501,9 +480,16 @@ async function loadTest(url, requestCount = requests, concurrencyCount = concurr
       const response = await fetch(url);
       const elapsed = performance.now() - started;
       latencies.push(elapsed);
+      statusCounts[response.status] = (statusCounts[response.status] ?? 0) + 1;
       if (!response.ok) {
         errors += 1;
-        await response.arrayBuffer();
+        const body = await response.text();
+        if (errorSamples.length < 3) {
+          errorSamples.push({
+            status: response.status,
+            body: body.slice(0, 500),
+          });
+        }
         continue;
       }
       await response.arrayBuffer();
@@ -522,6 +508,8 @@ async function loadTest(url, requestCount = requests, concurrencyCount = concurr
     p95Ms: pick(latencies, 0.95),
     p99Ms: pick(latencies, 0.99),
     maxMs: latencies.at(-1) ?? null,
+    statusCounts,
+    errorSamples,
   };
 }
 
@@ -537,10 +525,10 @@ function formatMarkdownReport(report) {
     `Run ID: \`${report.runId}\``,
     `Created at: \`${report.createdAt}\``,
     `Database source: \`${report.database.source}\``,
-    `Articles: \`${report.database.articleCount}\``,
+    `Table: \`${report.database.table}\``,
+    `Rows: \`${report.database.rows}\``,
     `Measured requests per route: \`${report.benchmark.requests}\``,
     `Concurrency: \`${report.benchmark.concurrency}\``,
-    `Repeat per request: \`${report.benchmark.repeat}\``,
     `Warmup requests per route: \`${report.benchmark.warmupRequests}\``,
     '',
     '| Worker | Route | Tail events | CPU p50 | CPU p95 | Wall p50 | Wall p95 | Latency p95 | Errors |',
@@ -589,6 +577,26 @@ function formatMarkdownReport(report) {
           formatRatio(comparison.p95Ratio),
         ].join(' | ').replace(/^/, '| ').replace(/$/, ' |'),
       );
+    }
+  }
+
+  const errorSamples = report.workers.flatMap((worker) => {
+    if (worker.status !== 'completed') return [];
+    return worker.routes.flatMap((route) =>
+      route.latency.errorSamples.map((sample) => ({
+        worker: worker.id,
+        route: route.id,
+        status: sample.status,
+        body: sample.body,
+      })),
+    );
+  });
+  if (errorSamples.length) {
+    lines.push('');
+    lines.push('## Error Samples');
+    lines.push('');
+    for (const sample of errorSamples) {
+      lines.push(`- ${sample.worker} / ${sample.route} status ${sample.status}: \`${sample.body.replaceAll('`', "'")}\``);
     }
   }
 

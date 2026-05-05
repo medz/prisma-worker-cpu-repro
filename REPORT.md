@@ -2,7 +2,8 @@
 
 ## Title
 
-High Cloudflare Worker CPU usage from Prisma ORM compared with Drizzle on equivalent request-scoped PostgreSQL queries
+High Cloudflare Worker CPU usage from Prisma ORM compared with Drizzle on an
+equivalent request-scoped PostgreSQL primary-key lookup
 
 ## Summary
 
@@ -11,12 +12,14 @@ production Worker using PostgreSQL. After migrating hot read APIs from Prisma to
 Drizzle, Worker CPU usage dropped significantly.
 
 This repository isolates the comparison outside the production application. It
-uses the same PostgreSQL database, schema, seed data, Worker runtime, request
-lifecycle, and benchmark routes for each ORM variant.
+uses the same PostgreSQL database, one-table schema, one seeded row, Worker
+runtime, request lifecycle, and benchmark route for each ORM variant. The goal
+is to measure ORM/runtime CPU overhead in Workers, not database query
+performance.
 
 Repository: https://github.com/medz/prisma-worker-cpu-repro
 
-## Important scope clarification
+## Important Scope Clarification
 
 This is not a global-client-cache issue.
 
@@ -30,7 +33,7 @@ All variants create ORM/database clients inside the request handler:
 We are not using isolate-level/global client caching because that is not a safe
 or correct assumption for this Worker workload.
 
-## What the benchmark measures
+## What The Benchmark Measures
 
 The benchmark measures deployed Cloudflare Worker invocation CPU and wall time.
 It does not use local timing as the CPU source.
@@ -39,14 +42,14 @@ For each route and Worker variant, the command:
 
 1. Starts `wrangler tail --format json`.
 2. Sends warmup requests that are excluded from the measurement.
-3. Sends measured requests with route-specific benchmark query parameters.
+3. Sends measured requests with deterministic benchmark query parameters.
 4. Reads `cpuTime` and `wallTime` from the Cloudflare tail events.
 5. Writes a per-run Markdown and JSON report, including Prisma/Drizzle CPU
    ratios.
 
 Client-side latency is included only as supporting context.
 
-## One-command reproduction
+## One-command Reproduction
 
 Prerequisites:
 
@@ -63,14 +66,16 @@ npm install
 npm run benchmark:cloudflare
 ```
 
-The default command is intentionally configured to produce visible CPU signal:
+The default command is intentionally configured to produce visible CPU signal
+while keeping database work minimal:
 
 | Setting | Default | Reason |
 | --- | ---: | --- |
-| Seeded articles | `100000` | Enough rows for relation and ordering queries to resemble content APIs. |
-| Measured requests per route | `60` | Enough tail samples for p50/p95 per route without an excessive run. |
-| Client concurrency | `6` | Exercises Worker request handling without making tail sampling noisy. |
-| ORM repeats per request | `50` | Amplifies ORM CPU work inside each invocation. |
+| Table | `Hello` | Removes relation shape and table-count differences from the comparison. |
+| Seeded rows | `1` | Keeps database data volume effectively out of scope. |
+| Benchmark routes | `1` | All variants perform the same primary-key lookup route. |
+| Measured requests per route | `60` | Enough tail samples for p50/p95 without an excessive run. |
+| Client concurrency | `6` | Exercises Worker request handling without making tail sampling too noisy. |
 | Warmup requests per route | `5` | Excludes first-request startup from steady-route CPU comparison. |
 | Temporary DB TTL | `30m` | Shortest supported `create-db` TTL, limiting retained resources. |
 
@@ -80,9 +85,9 @@ The command provisions a temporary Prisma Postgres database via:
 npx create-db@latest create --json --ttl 30m
 ```
 
-It then applies `packages/db/schema.sql`, seeds deterministic data, builds and
-deploys the runnable Workers, runs the benchmark, writes the reports, and deletes
-the deployed Workers in a `finally` block.
+It then applies `packages/db/schema.sql`, seeds the single `Hello` row, builds
+and deploys the runnable Workers, runs the benchmark, writes the reports, and
+deletes the deployed Workers in a `finally` block.
 
 If a process is interrupted, run:
 
@@ -122,64 +127,54 @@ Prisma Next reference:
 - At the time this repo was prepared, normal npm `next` dist-tags were not
   available for `prisma`, `@prisma/client`, or `@prisma/adapter-pg`.
 
-## Database workload
+## Database Workload
 
-The schema models common content API access patterns:
+The schema is intentionally tiny:
 
-- `Article`
-- `Column`
-- `Tag`
-- `Series`
-- `ArticlesOnColumns`
-- `ArticlesOnTags`
-- `SeriesOnArticles`
-- `ArticleMetric`
+```sql
+create table "Hello" (
+  "id" text primary key,
+  "content" text not null
+);
+```
 
-Seed defaults:
+Seed data:
 
-- `Article`: 100,000 rows
-- `hot` column: about 35% of articles
-- `older-hot` column: about 30% of articles, deliberately shifted away from the
-  newest global articles
-- `tail` column: sparse
-- source article `a00000001` has many tags to stress relation filters
+- one row
+- `id = 'hello'`
+- fixed text content
 
-This covers:
+This avoids bringing database schema differences, query planning complexity,
+join strategies, sort performance, or large result hydration into the primary
+comparison.
 
-- simple published article list
-- article list by relation
-- detail hydration with related records
-- related article recommendation shape
+## Benchmark Route
 
-## Benchmark routes
+Each runnable Worker exposes the same route:
 
-Each runnable Worker exposes the same routes:
+- `/bench/hello`
 
-- `/bench/articles?limit=20&repeat=50`
-- `/bench/articles-by-column?columnId=hot&limit=20&repeat=50`
-- `/bench/articles-by-column?columnId=older-hot&limit=20&repeat=50`
-- `/bench/detail?articleId=a00000001&repeat=50`
-- `/bench/related?articleId=a00000001&limit=20&repeat=50`
+Each request selects the same row by primary key and returns a small JSON
+response containing whether the row was found and the content length. This keeps
+the main comparison focused on per-request ORM/runtime overhead rather than
+database round-trip amplification.
 
-`repeat` repeats the same ORM operation inside one Worker invocation. This keeps
-the HTTP shape deterministic while making ORM-side CPU work visible in
-Cloudflare invocation metrics.
+## Expected Result
 
-## Expected result
+For an equivalent one-row primary-key lookup and request-scoped lifecycle,
+Prisma should ideally be in the same order of magnitude as Drizzle for Worker
+invocation CPU time. If Prisma v7 is consistently and materially higher on CPU
+p50/p95, the result would suggest CPU overhead in Prisma's Worker runtime path,
+client construction, generated metadata, query planning, query execution, or
+result hydration.
 
-For equivalent query shapes and request-scoped lifecycle, Prisma should ideally
-be in the same order of magnitude as Drizzle for Worker invocation CPU time. If
-Prisma v7 is consistently and materially higher on CPU p50/p95, the result would
-suggest CPU overhead in Prisma's Worker runtime path, client construction,
-generated metadata, query planning, query execution, or result hydration.
-
-## Questions for Prisma
+## Questions For Prisma
 
 1. Is Prisma v7 expected to spend materially more CPU than Drizzle for
    request-scoped Cloudflare Worker usage with PostgreSQL?
 2. Are there known Prisma v7 Worker runtime costs around client construction,
-   query planning, generated model metadata, relation query execution, or result
-   hydration?
+   query planning, generated model metadata, query execution, or result
+   hydration even for a primary-key lookup?
 3. Is Prisma Next expected to materially reduce this CPU overhead?
 4. Once Prisma Next Early Access is available, what is the recommended package
    or install path for running this same Worker benchmark?

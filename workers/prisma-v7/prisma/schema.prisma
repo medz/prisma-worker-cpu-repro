@@ -9,76 +9,7 @@ datasource db {
   provider = "postgresql"
 }
 
-model Article {
-  id          String              @id
-  type        String
-  status      String
-  title       String
-  desc        String
-  content     String
-  publishedAt DateTime            @db.Timestamptz(3)
-  createdAt   DateTime            @default(now()) @db.Timestamptz(3)
-  columns     ArticlesOnColumns[]
-  tags        ArticlesOnTags[]
-  series      SeriesOnArticles[]
-  metric      ArticleMetric?
-
-  @@index([status, publishedAt(sort: Desc)], map: "article_status_published_at_idx")
-  @@index([publishedAt(sort: Desc)], map: "article_published_at_idx")
+model Hello {
+  id      String @id
+  content String
 }
-
-model Column {
-  id       String              @id
-  name     String
-  articles ArticlesOnColumns[]
-}
-
-model Tag {
-  id       String           @id
-  name     String
-  articles ArticlesOnTags[]
-}
-
-model Series {
-  id       String             @id
-  name     String
-  articles SeriesOnArticles[]
-}
-
-model ArticlesOnColumns {
-  articleId String
-  columnId  String
-  article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
-  column    Column  @relation(fields: [columnId], references: [id], onDelete: Cascade)
-
-  @@id([articleId, columnId])
-  @@index([columnId, articleId], map: "articles_on_columns_column_article_idx")
-}
-
-model ArticlesOnTags {
-  articleId String
-  tagId     String
-  article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
-  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
-
-  @@id([articleId, tagId])
-  @@index([tagId, articleId], map: "articles_on_tags_tag_article_idx")
-}
-
-model SeriesOnArticles {
-  articleId String
-  seriesId  String
-  article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
-  series    Series  @relation(fields: [seriesId], references: [id], onDelete: Cascade)
-
-  @@id([articleId, seriesId])
-  @@index([seriesId, articleId], map: "series_on_articles_series_article_idx")
-}
-
-model ArticleMetric {
-  articleId String  @id
-  views     Int     @default(0)
-  likes     Int     @default(0)
-  article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
-}
-
